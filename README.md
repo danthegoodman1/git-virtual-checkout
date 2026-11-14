@@ -1,6 +1,6 @@
 # git-virtual-checkout
 
-`gvc` clones a GitHub repository in seconds at any size, and stock git works inside it. The working tree is a FUSE mount that lists every file at once and downloads each one the first time something reads it, with your edits in a local layer on top. git keeps its own repository, index and protocol, so `status`, `commit`, `switch`, `merge`, `rebase` and `push` run unmodified.
+`gvc` clones a GitHub repository in seconds at any size, and stock git works inside it. It's built for online agent workloads: many short-lived workspaces, each reading a fraction of a large repository, asking questions of its history, and pushing a change. The working tree is a FUSE mount that lists every file at once and downloads each one the first time something reads it, with your edits in a local layer on top. git keeps its own repository, index and protocol, so `status`, `commit`, `switch`, `merge`, `rebase` and `push` run unmodified.
 
 For the Linux kernel's 97,371 files, the git and API calls that `gvc clone` makes finished in 4.4 s and downloaded 11 MB. `git clone --depth=1` took 40 s and 304 MB, and `git clone` took 8.6 minutes and 6.6 GB. [docs/feasibility.md](docs/feasibility.md) is the design and the experiments behind it, and [PLAN.md](PLAN.md) is the build.
 
@@ -9,7 +9,7 @@ For the Linux kernel's 97,371 files, the git and API calls that `gvc clone` make
   <img src="docs/images/clone-time-light.svg" alt="Time to a usable checkout, in median seconds on tmpfs, each repository on its own scale. torvalds/linux, 97,371 files: git clone 518 s, git clone --depth=1 40 s, gvc clone 4.4 s. facebook/react, 7,275 files: 61 s, 2.8 s and 1.1 s. danthegoodman1/lionturtle, 83 files: 1.1 s, 0.5 s and 0.6 s. The gvc figures time the git and GitHub API calls gvc clone will make.">
 </picture>
 
-**Status: design.** gvc isn't built yet. The experiments in [docs/feasibility.md](docs/feasibility.md) show each piece working against GitHub today, and [PLAN.md](PLAN.md) lays out the phases. The gvc numbers on this page time the git and GitHub API calls `gvc clone` will make, run by [`scripts/bench/clones`](scripts/bench/clones).
+**Status: design.** gvc isn't built yet. The experiments in [docs/feasibility.md](docs/feasibility.md) show each piece working against GitHub today, and [PLAN.md](PLAN.md) lays out the phases. A go/no-go gate after the first working checkout replays agent sessions against the best stock setup, and the build goes on only if gvc wins clearly. The gvc numbers on this page time the git and GitHub API calls `gvc clone` will make, run by [`scripts/bench/clones`](scripts/bench/clones).
 
 ## How it works
 
@@ -23,7 +23,9 @@ For the Linux kernel's 97,371 files, the git and API calls that `gvc clone` make
 
 **Commits and pushes without history.** git hashes a commit from the blob ids already in the index, so unchanged files never download. A push from a depth-1 partial clone made zero extra fetches in testing.
 
-**History on demand.** A repository that fits fetches its commits and trees in the background: git/git's in 6 s. For larger ones, a lazy object store serves commits, trees and blobs as git reads them, and planners batch what `git log` and `git blame` will read. Blame of git/git's Makefile took 3 s with the batch, against 282 s fetching one object at a time.
+**History from GitHub.** `gvc log`, `gvc blame`, `gvc show`, `gvc diff` and `gvc merge-base` answer from GitHub's APIs, with no local history and in any checkout of a GitHub repository. GitHub's blame of git/git's Makefile matched `git blame` on all 4,146 lines in 3.7 s. Unpushed commits come from the local repository.
+
+**History for stock git.** Each clone fetches its last 20 generations of commits in the background (546 commits and 512 KB for Linux), so `git log -n` runs locally. Past that, a lazy object store serves commits, trees and blobs as git reads them, and planners batch what `git log` and `git blame` will read: blame of git/git's Makefile took 3 s with the batch, against 282 s fetching one object at a time.
 
 **Git LFS without smudging.** LFS files read as their content, sized from the pointer and fetched by byte range, with no git-lfs install. gvc cleans new LFS files on `git add` and uploads their objects on push.
 
@@ -62,7 +64,7 @@ GitHub's server time dominates the Linux bootstrap and varied across runs: 4.1 s
 - **Readers of every file download every file.** `rg`, IDE indexers and builds read what they read. `gvc hydrate` streams the whole tree at tarball speed.
 - **Offline,** a file never read fails with `EIO`.
 - **`git checkout <rev> -- <path>` fetches one blob per file.** In testing, one kernel directory took 338 fetches in 300 s. `gvc prefetch` batches them first.
-- **History until it hydrates.** `git log -- <path>`, `blame` and `merge-base` stop at the shallow boundary until history hydrates or the lazy object store serves it.
+- **Stock git history past the recent window.** `git log -- <path>`, `blame` and `merge-base` stop at the shallow boundary until the lazy object store serves them; gvc's own history commands have no such limit.
 - **Each syscall on a file never edited passes through the daemon.** Edited and hydrated files use FUSE passthrough.
 - **Linux first.** macOS follows through FSKit; Windows isn't planned.
 - **GitHub first.** The backend speaks the git protocol any host serves, with GitHub's APIs as accelerators; GitLab or Gitea comes next.
@@ -75,6 +77,8 @@ The planned interface:
 gvc clone https://github.com/torvalds/linux
 cd linux
 git status
+gvc log -n 5 -- kernel/fork.c                # answered by GitHub, no local history
+gvc blame -L 100,140 kernel/fork.c
 git switch -c fix && $EDITOR kernel/fork.c && git commit -am "Fix fork" && git push -u origin fix
 gvc worktree add ../linux-review origin/master
 gvc unmount

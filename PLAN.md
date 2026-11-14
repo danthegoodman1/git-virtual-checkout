@@ -2,9 +2,13 @@
 
 ## Overarching Goal
 
-Build `gvc`, which clones a GitHub repository in seconds at any size and lets stock git work inside it. The working tree is a filesystem mount with two layers: the commit's tree, fetched file by file on first read, under a local layer that holds every edit. git keeps its own repository, index and protocol. gvc writes the index git trusts, answers git's fsmonitor hook, keeps the layers in step as git moves between commits, shows Git LFS content in place of pointers, and serves history on demand. [docs/feasibility.md](docs/feasibility.md) is the design and the evidence behind it.
+Build `gvc` if it gives online agent workloads a clear win, and stop if it doesn't. The workload is many short-lived workspaces on large GitHub repositories, always online: each workspace reads a fraction of the files, searches, runs git, asks questions of history, builds, commits and pushes, often beside other workspaces on the same repository.
 
-The core plan ends with comprehensive CI testing, release builds, and performance work on Linux. macOS through FSKit (track M1) and a second git host (track B1) follow it. Non-goals until a phase names them: Windows, modifying or wrapping the git binary, server-side commits, sparse checkout, and hosts other than GitHub.
+`gvc` clones a GitHub repository in seconds at any size and lets stock git work inside it. The working tree is a filesystem mount with two layers: the commit's tree, fetched file by file on first read, under a local layer that holds every edit. git keeps its own repository, index and protocol. gvc writes the index git trusts, answers git's fsmonitor hook, keeps the layers in step as git moves between commits, shows Git LFS content in place of pointers, and serves history on demand. Questions of history that git would answer from local objects, gvc's own commands answer from GitHub's APIs. [docs/feasibility.md](docs/feasibility.md) is the design and the evidence behind it.
+
+Gate G1, after Phase 3, decides whether to go on: replayed agent sessions must beat the best stock setup clearly, or the build stops there.
+
+The core plan ends with comprehensive CI testing, release builds, and performance work on Linux. macOS through FSKit (track M1) and a second git host (track B1) follow it. Non-goals until a phase names them: offline use, Windows, modifying or wrapping the git binary, server-side commits, sparse checkout, and hosts other than GitHub.
 
 ## Implementation Principles
 
@@ -17,10 +21,11 @@ The core plan ends with comprehensive CI testing, release builds, and performanc
 - A write the filesystem acknowledges survives a daemon crash, with POSIX `fsync` semantics for data.
 - Tests count fetches. Every test that runs git asserts the requests and bytes the test server saw.
 - PR CI is hermetic and finishes in 10 minutes. Network tests against GitHub run nightly.
+- Agent workloads decide. Each phase's benchmarks include the agent replay suite (0H), and a change that slows a replayed session doesn't ship.
 - Build the smallest implementation that meets the phase gate. Add abstraction when a later phase needs it.
 - A change that alters the design updates `docs/feasibility.md` in the same commit.
 - Each phase ends with `/code-review high`. Findings are fixed or recorded in the phase ledger before the phase closes.
-- Execution order: Phase 0 through Phase 9, then M1, then B1.
+- Execution order: Phase 0, Phase 1, A1, Phase 2, Phase 3, G1, then Phase 4 through Phase 9, M1 and B1.
 
 ## Testing Strategy
 
@@ -34,6 +39,7 @@ The core plan ends with comprehensive CI testing, release builds, and performanc
 - **Git contract tests:** strace-based checks of the git behaviors gvc relies on, across a git version matrix (2.40, Ubuntu's, latest).
 - **Real GitHub smoke tests:** nightly runs against danthegoodman1/lionturtle, facebook/react and torvalds/linux.
 - **Planted bugs:** `scripts/mutants` applies known bugs to a scratch copy and reports which layer catches each. Every phase adds its own, and every one must be caught.
+- **Agent replay benchmark:** scripted sessions shaped like real agent traces, run in 1 and 8 workspaces against the best stock setup (0H). It gates G1 and every later phase.
 - **Benchmarks:** on tmpfs, so disk speed drops out. Local-server runs with injected latency are reproducible; GitHub runs feed the README.
 - **CI budget:** PR CI runs lint, unit and property tests, FUSE integration, and a fixed differential seed budget in parallel jobs, within 10 minutes. Nightly CI runs 10× the seeds, the git matrix, fuzzing, mutants, GitHub smoke tests and benchmarks, within 60 minutes.
 
@@ -50,6 +56,7 @@ Scope:
 - 0E `gvc-testkit` server: smart HTTP through `git http-backend` with protocol v2, `uploadpack.allowFilter` and `uploadpack.allowAnySHA1InWant`, plus request, object and byte counters.
 - 0F Fixture generator: seeded repositories with deep trees, long histories, merges, renames, symlinks, executable files, a submodule, LFS-attributed files, `.gitattributes` conversions and non-ASCII names.
 - 0G `scripts/mutants`, adapted from inodedb.
+- 0H Agent replay benchmark. Each session reads line ranges of files, greps named directories and once the whole tree, runs `git status`, `diff`, `log -n`, `show` and `show <rev>:<path>`, edits, builds and tests, commits and pushes. It runs in 1 and 8 workspaces on Linux, react and lionturtle, against two stock setups: `git clone --depth=1` per workspace, and one blobless clone with a `git worktree` per workspace. It reports time to a ready workspace, session wall time, bytes downloaded and disk used.
 
 Out of scope:
 - Any filesystem or protocol code (Phase 1 and later).
@@ -72,6 +79,7 @@ Status ledger:
 | Incomplete | Work | 0E: Testkit server and counters | Missing: `crates/testkit` server and its clone test. |
 | Incomplete | Work | 0F: Fixture generator | Missing: seeded generator and a test that two runs of one seed produce identical repositories. |
 | Incomplete | Work | 0G: Planted-bug tooling | Missing: `scripts/mutants` and a caught trivial bug. |
+| Incomplete | Work | 0H: Agent replay benchmark with stock baselines | Missing: session scripts, harness, and baseline results for both stock setups. |
 | Incomplete | Decision | Crate `git-virtual-checkout`, binary `gvc` | crates.io's `gvc` belongs to another project. Missing: workspace manifest naming. |
 | Incomplete | Gate | CI passes on `main` with the testkit clone test | Missing: CI run id. |
 
@@ -115,6 +123,47 @@ Status ledger:
 | Incomplete | Test | Fuzz targets run clean for 10 minutes each | Missing: `fuzz/` targets and a run log. |
 | Incomplete | Test | Planted bugs caught | Missing: mutants report. |
 
+## A1: History questions through GitHub
+
+Goal:
+Agents get answers to history questions from GitHub in seconds, with no local history, in any checkout of a GitHub repository, gvc's or not.
+
+Scope:
+- A1A `gvc log [<rev>] [-n <n>] [-- <path>]`: commits from GraphQL `history`, in git's `--oneline` and a `--format` subset, and as `--json`.
+- A1B `gvc blame [-L <range>] <path> [<rev>]`: GraphQL `blame`, in `git blame`'s default and `--porcelain` formats, and as `--json`.
+- A1C `gvc show <rev>[:<path>]` and `gvc diff <a> <b> [-- <path>]`: commits and patches from the REST commit and compare endpoints; file contents from raw.githubusercontent.com.
+- A1D `gvc merge-base <a> <b>`: the REST compare endpoint.
+- A1E Local commits on top: with unpushed commits, `gvc blame` runs `git blame <base>..HEAD` locally and fills the lines older than the base from GitHub's blame of the base; `gvc log` lists the local commits first. Uncommitted edits count as `git blame` counts them.
+- A1F Agent integration: stable `--json` schemas, and a short instructions file agents load that says when to use each command in place of git's.
+- A1G A request budget per command, a response cache keyed by commit id (answers about a commit never change), and an error that names the exhausted quota and its reset time.
+
+Out of scope:
+- Pickaxe searches (`-S`, `-G`) and code search, which GitHub's APIs can't answer exactly.
+
+Completion gate:
+On git/git, react and Linux, `gvc blame` matches `git blame --porcelain`'s line attributions on 50 sampled files, `gvc log -- <path>` matches its documented `git log` equivalent on the same files, and each command answers within 5 s at p50 for files under 5,000 lines.
+
+Testing plan:
+- Recorded GitHub responses in PR CI; live comparisons against full clones nightly.
+- A test that pins which `git log` options GitHub's path history matches, for history simplification and renames.
+- Composition tests with local commits and uncommitted edits.
+- Planted bugs: an off-by-one in `-L` ranges, a dropped local commit.
+
+Status ledger:
+
+| Status | Type | Item | Evidence / Gap |
+| --- | --- | --- | --- |
+| Incomplete | Work | A1A: `gvc log` | Missing: command and comparison tests. |
+| Incomplete | Work | A1B: `gvc blame` | Missing: command and attribution tests. |
+| Incomplete | Work | A1C: `gvc show` and `gvc diff` | Missing: commands and patch-equality tests. |
+| Incomplete | Work | A1D: `gvc merge-base` | Missing: command and tests. |
+| Incomplete | Work | A1E: Local commits on top | Missing: composition and its tests. |
+| Incomplete | Doc | A1F: Agent instructions and JSON schemas | Missing: instructions file and schema tests. |
+| Incomplete | Work | A1G: Request budget, cache, quota errors | Missing: implementation and a quota-exhaustion test. |
+| Complete | Decision | GitHub's blame is trustworthy as an answer | `docs/feasibility.md`: GraphQL blame matched local `git blame` on all 4,146 lines of git/git's Makefile in 3.7 s. |
+| Incomplete | Gate | Attributions and logs match on 50 files per repository; p50 within 5 s | Missing: nightly comparison run. |
+| Incomplete | Test | Planted bugs caught | Missing: mutants report. |
+
 ## Phase 2: Read-only virtual checkout
 
 Goal:
@@ -125,7 +174,8 @@ Scope:
 - 2B `gvc-fuse`: serves any `Filesystem` through `fuser` 0.18 with multi-threaded dispatch and async replies, `default_permissions`, entry and attr timeouts, `keep_cache`, and clean unmount.
 - 2C `gvc-overlay` lower layer: a compact in-memory tree index (interned names, sorted children, mode, oid, size), stable inode numbers, a fixed timestamp from the commit, symlinks prefetched in one batch at clone, executable bits, submodules as empty directories.
 - 2D `gvc clone`: `ls-refs`, then `git clone --filter=blob:none --depth=1 --no-checkout` for `.git` beside the size walk, with the mount up at once. A lookup waits only on its own directory: a directory not yet listed comes from one non-recursive tree-API call while the full listing loads. git commands work once the full listing and the index land.
-- 2E Read path: first read fetches through the coalescer into the store; failures surface as `EIO` with a logged cause; reads offline fail fast.
+- 2E Read path: first read fetches through the coalescer into the store; a miss also queues its directory's unread blobs, up to a size bound, so a search that reads files one at a time still fetches in batches; failures surface as `EIO` with a logged cause; reads offline fail fast.
+- 2G Whole-tree scans: when reads sweep across directories, gvc streams the commit's tarball into the store, checking each file against its tree oid, so a whole-tree grep costs about one shallow clone, once per commit for every workspace that shares the store.
 - 2F `gvc mount`, `gvc unmount`, `gvc status`, and the daemon's lifecycle: one process per mount, a pid file, a control socket, all mounts sharing the store.
 
 Out of scope:
@@ -151,6 +201,7 @@ Status ledger:
 | Incomplete | Work | 2D: `gvc clone` bootstrap with latching | Missing: command and latching test. |
 | Incomplete | Work | 2E: Read path and errors | Missing: read tests, including offline and failure injection. |
 | Incomplete | Work | 2F: Mount lifecycle commands | Missing: commands and lifecycle tests. |
+| Incomplete | Work | 2G: Scan detection and streamed hydration | Missing: detector, tarball path, and a whole-tree grep timed against `git clone --depth=1`. |
 | Incomplete | Decision | One daemon per mount, sharing the on-disk store | Missing: confirmation once 2F runs two mounts. |
 | Incomplete | Gate | Linux root listed within 2 s and index written within 10 s; react's oids reproduced | Missing: timed run and verification log. |
 | Incomplete | Test | VFS conformance, direct and through FUSE | Missing: suite and CI job. |
@@ -168,6 +219,8 @@ Scope:
 - 3D fsmonitor hook (protocol v2): `gvc hook fsmonitor` asks the daemon over its socket; tokens come from the write log; an unknown token answers with a full rescan.
 - 3E Prefetch every `.gitignore` and `.gitattributes` blob at clone, since git reads them on every status.
 - 3F Zero-fetch accounting for untouched files across status, diff, add, commit and push.
+- 3G A recent history window: in the background after clone, `git fetch --filter=tree:0 --deepen=20`, so `git log -n` runs locally. On Linux that is 546 commits and 512 KB in 1.9 s; `--deepen=999` pulled all 1.47 million commits (804 MB), since depth counts generations through every merge.
+- 3H Build outputs at native speed: writes under ignored build directories (`target/`, `node_modules/`, `build/`, and any listed in config) go through FUSE passthrough to native files.
 
 Out of scope:
 - Re-basing after checkout (Phase 4); LFS writes (Phase 5).
@@ -193,10 +246,44 @@ Status ledger:
 | Incomplete | Work | 3D: fsmonitor hook | Missing: hook, socket protocol, token tests. |
 | Incomplete | Work | 3E: Ignore and attribute prefetch | Missing: prefetch and fetch-count test. |
 | Incomplete | Work | 3F: Zero-fetch accounting | Missing: counter assertions in every git differential scenario. |
+| Incomplete | Work | 3G: Recent history window | Missing: background deepen and a `git log -n 50` test with zero fetches. |
+| Incomplete | Work | 3H: Build outputs at native speed | Missing: passthrough for ignored build directories and a `cargo build` timed against a native checkout. |
 | Incomplete | Decision | Overlay metadata store | Options: lionturtle, redb, or a journal of our own. Missing: choice and its crash-test results. |
 | Incomplete | Decision | Hard links in the working tree | Default: `EPERM`. Missing: a survey of tools that create them in checkouts. |
 | Incomplete | Gate | Differential scenarios pass with zero untouched fetches; crash recovery intact | Missing: CI run and crash-test log. |
 | Incomplete | Test | Planted bugs caught | Missing: mutants report. |
+
+## G1: Agent go/no-go
+
+Goal:
+Decide from measurements whether gvc gives online agent workloads a clear win, before building Phases 4 through 9.
+
+Scope:
+- G1A Run the agent replay benchmark (0H) on Phase 3's build: 1 and 8 workspaces on Linux, react and lionturtle, with 8 `gvc clone`s sharing one store against the two stock setups.
+- G1B Compare each measure with the best stock setup for that scenario.
+- G1C Record the result and the decision in this ledger; on a no-go, record what would change it.
+
+Out of scope:
+- Tuning to pass the gate beyond what Phases 2 and 3 scope; a miss goes back to design.
+
+Completion gate:
+A go needs every criterion; a miss on any is a no-go until a design change addresses it.
+- On Linux and react, a ready workspace at least 5× sooner than the best stock setup.
+- On Linux and react at 8 workspaces, at least 5× fewer bytes downloaded per added workspace.
+- Every replayed session, including those with a whole-tree grep and a build, within 1.1× the best stock setup's wall time.
+- On lionturtle, within 1.1× the best stock setup on every measure.
+
+Testing plan:
+- Three runs per configuration on tmpfs against GitHub, reporting medians, with the commands in `BENCHMARKS.md`.
+
+Status ledger:
+
+| Status | Type | Item | Evidence / Gap |
+| --- | --- | --- | --- |
+| Incomplete | Work | G1A: Agent replay on Phase 3's build | Missing: results in `BENCHMARKS.md`. |
+| Incomplete | Work | G1B: Comparison with the best stock setup | Missing: comparison table. |
+| Incomplete | Decision | G1C: Go or no-go | Missing: the decision and its evidence. |
+| Incomplete | Gate | All four go criteria met | Missing: recorded runs. |
 
 ## Phase 4: Moving between commits, worktrees and history
 
@@ -209,7 +296,7 @@ Scope:
 - 4C `gvc worktree add`, `remove` and `list`: `git worktree add --no-checkout`, a new mount, and its index, sharing the store.
 - 4D Background history hydration: `git fetch --unshallow --filter=blob:none`, with progress and `gvc hydrate --history`.
 - 4E `gvc prefetch <rev> <path>...` for commands that fetch one blob per file, such as `git checkout <rev> -- <path>`.
-- 4F `gvc hydrate`: stream the tarball, check each file's hash against its tree oid, and fetch the mismatches; or `git backfill` where the host prefers.
+- 4F `gvc hydrate`: the 2G tarball stream on request, with the mismatched files fetched by oid, or `git backfill` where the host prefers.
 - 4G Hook chaining: run the user's hooks, `core.hooksPath` and git-lfs's hooks after gvc's.
 
 Out of scope:
@@ -280,15 +367,14 @@ Status ledger:
 ## Phase 6: Lazy object store and fast history
 
 Goal:
-A repository too large to hydrate shows its full history at once: commits, trees and blobs arrive as git reads them, and log, blame and path history run fast with output identical to a full clone.
+A repository too large to hydrate shows its full history at once, for the stock git commands agents run anyway: commits, trees and blobs arrive as git reads them, and log, show, blame and pickaxe searches run fast with output identical to a full clone. Linux's commits alone are 804 MB, so it needs this phase.
 
 Scope:
 - 6A `gvc-odb`, a second `Filesystem`: a read-only loose-object view (`xx/<38 hex>`) served by the same adapter; resolves only ids a ref or a served object references, and answers every other id with `ENOENT` without a network call.
 - 6B No-shallow mode: `objects/info/alternates` points at the store's mount, the shallow file goes, and each commit request reads ahead its next N ancestors in one fetch.
 - 6C Command-aware prefetch: the caller's command line, from the caller context, picks a planner: commit ranges for `log`, every version of a path for `blame` (`git log --full-history -m --raw`), and the named paths for `checkout <rev> -- <path>`.
-- 6D `gvc blame` and `gvc log -- <path>` through GraphQL and REST, with local commits composed on top and git as the fallback.
-- 6E `core.abbrev=12`, and short-SHA resolution through the API in gvc commands.
-- 6F Git contract tests: strace-based checks across the version matrix of direct loose-object opens, `access()` probes on writes, and abbreviation readdirs.
+- 6D `core.abbrev=12`, and short-SHA resolution through the API in gvc commands.
+- 6E Git contract tests: strace-based checks across the version matrix of direct loose-object opens, `access()` probes on writes, and abbreviation readdirs.
 
 Out of scope:
 - Serving packfiles from the store; `git fsck` and `rev-list --objects --all` without hydration.
@@ -310,9 +396,8 @@ Status ledger:
 | Incomplete | Work | 6A: `gvc-odb` filesystem | Missing: implementation and conformance run. |
 | Incomplete | Work | 6B: No-shallow mode with readahead | Missing: alternates setup and readahead tests. |
 | Incomplete | Work | 6C: Command-aware prefetch | Missing: planners and fetch-bound tests. |
-| Incomplete | Work | 6D: API-backed blame and path log | Missing: commands and equality tests against `git blame`. |
-| Incomplete | Work | 6E: Abbreviations and short SHAs | Missing: config and resolution tests. |
-| Incomplete | Work | 6F: Git contract tests | Missing: strace harness and matrix job. |
+| Incomplete | Work | 6D: Abbreviations and short SHAs | Missing: config and resolution tests. |
+| Incomplete | Work | 6E: Git contract tests | Missing: strace harness and matrix job. |
 | Incomplete | Gate | Linux log and blame identical to a full clone; blame within 15 s | Missing: timed differential run. |
 | Incomplete | Test | Planted bugs caught | Missing: mutants report. |
 
@@ -390,7 +475,7 @@ Goal:
 gvc meets measured targets for bootstrap, status, metadata, reads and memory, with benchmarks on tmpfs that CI can rerun, and the README's numbers come from gvc itself.
 
 Scope:
-- 9A Bench harness (`crates/bench`, `scripts/bench`): clone to first listing, clean and dirty `git status`, `find` and `ls -R`, cold-read p50 and p99, warm read throughput, a build-like read of every source file, `gvc switch`, and blame. The store, upper layers and baseline checkouts live on tmpfs, against the testkit server at 0, 20 and 80 ms injected round trips and against GitHub.
+- 9A Bench harness (`crates/bench`, `scripts/bench`): the agent replay suite, clone to first listing, clean and dirty `git status`, `find` and `ls -R`, cold-read p50 and p99, warm read throughput, a build-like read of every source file, `gvc switch`, and blame. The store, upper layers and baseline checkouts live on tmpfs, against the testkit server at 0, 20 and 80 ms injected round trips and against GitHub.
 - 9B Targets, each measured against a stock checkout on tmpfs in the same run:
   - clone to first listing: Linux within 1 s;
   - clone to a written index: Linux at or under 4.4 s, the median of the git and API calls that stand in for `gvc clone` today;

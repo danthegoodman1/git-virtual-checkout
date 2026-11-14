@@ -133,7 +133,11 @@ three levels:
    Commits-only (`--filter=tree:0`) is 37 MB in 3 s, but `git log -- path`
    then lazily fetches one tree per commit: 31 fetches and 12.7 s for five
    results. Prefer blobless. Until hydration finishes, the repo is shallow, so
-   `git log` stops at HEAD and `merge-base` across the boundary fails.
+   `git log` stops at HEAD and `merge-base` across the boundary fails. Linux is
+   too large to hydrate: its commits alone are 804 MB. A window of recent
+   history is cheap, since `--deepen=20` brought 546 commits in 512 KB and
+   1.9 s, but depth counts generations through every merge, and
+   `--deepen=999` pulled every commit.
 2. **A lazy object store (Phase 6) for repos too large to hydrate.** Point
    `.git/objects/info/alternates` at a second FUSE mount that materializes any
    loose object (`xx/yyyy…`) on lookup. The repo then has no shallow boundary,
@@ -411,8 +415,6 @@ partial clone there.
   asked for? If so, a local promisor proxy could answer the first miss for a
   path with every version of that path, giving batched prefetch before the
   Phase 6 store exists.
-- How large is a blobless or treeless full-history fetch of Linux? It decides
-  which repos hydrate (Phase 4) and which need the lazy store (Phase 6).
 - Does raw.githubusercontent.com hold up as an authenticated channel at bulk
   volume?
 - Do git's object-lookup syscalls stay stable from 2.40 to 2.53 under a FUSE
@@ -431,6 +433,8 @@ All runs used an authenticated `gh` token.
 | `scripts/bench/clones`, Linux: ls-refs, blobless depth-1 fetch and every blob size (26 tree-API calls, 7.7 MB gzipped), three runs | 4.1 s, 4.4 s, 8.4 s; size walk 3.8 s, 4.1 s, 4.3 s |
 | `git clone --depth=1` torvalds/linux | 40.4 s, 41.1 s, 36.3 s; 304 MB downloaded |
 | `git clone` torvalds/linux | 518 s; 6.6 GB downloaded |
+| `git fetch --filter=tree:0 --deepen=20` on a Linux depth-1 clone | 1.9 s; 512 KB; 546 commits |
+| `git fetch --filter=tree:0 --deepen=999`, the same | Every commit: 1,468,845 commits, an 804 MB pack, about 6 minutes |
 | git/git full-history clones: treeless / blobless / full | 3.2 s, 37 MB / 6.1 s, 117 MB / 16.8 s, 323 MB |
 | Lazy fetch of one blob, Linux depth-1 clone | 7.3–14.2 s for the first three, then 0.23–0.28 s |
 | Lazy fetch of one blob, git/git | 0.26–0.34 s |
