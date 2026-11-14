@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Render the README's clone charts from docs/bench/clones.jsonl.
+
+Writes docs/images/clone-{time,data}-{light,dark}.svg and prints the medians as Markdown tables.
+Each repo gets its own panel on its own linear scale, since Linux and lionturtle differ
+by three orders of magnitude.
+
+Usage: scripts/bench/charts [RESULTS.jsonl]
+"""
+import json
+import os
+import statistics
+import sys
+from collections import defaultdict
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+RESULTS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "docs/bench/clones.jsonl")
+OUT = os.path.join(ROOT, "docs/images")
+
+REPOS = ["torvalds/linux", "facebook/react", "danthegoodman1/lionturtle"]
+METHODS = [("full", "git clone"), ("shallow", "git clone --depth=1"), ("gvc", "gvc clone *")]
+
+# Colors validated with the dataviz skill's validate_palette.js: gvc in the accent blue,
+# stock git in a de-emphasis gray, on GitHub's page colors.
+THEMES = {
+    "light": {"bg": "#ffffff", "text": "#1f2328", "muted": "#59636e", "rule": "#d1d9e0",
+              "gvc": "#2a78d6", "git": "#818b98"},
+    "dark": {"bg": "#0d1117", "text": "#f0f6fc", "muted": "#9198a1", "rule": "#3d444d",
+             "gvc": "#3987e5", "git": "#6e7681"},
+}
+FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif"
+MONO = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
+
+
+def load():
+    runs = defaultdict(list)
+    for line in open(RESULTS):
+        r = json.loads(line)
+        runs[(r["repo"], r["method"])].append(r)
+    med = {}
+    for key, rs in runs.items():
+        med[key] = {
+            "seconds": statistics.median(r["seconds"] for r in rs),
+            "downloaded": statistics.median(r["downloaded"] for r in rs),
+            "on_disk": statistics.median(r["on_disk"] for r in rs),
+            "files": rs[0]["files"],
+            "runs": len(rs),
+        }
+    return med
+
+
+def fmt_s(s):
+    return f"{s:.1f} s" if s < 10 else f"{s:,.0f} s"
+
+
+def fmt_b(b):
+    for unit, size in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if b >= size:
+            v = b / size
+            return f"{v:.1f} {unit}" if v < 100 else f"{v:,.0f} {unit}"
+    return f"{b:.0f} B"
+
+
+def esc(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def bar(x, y, w, h, color):
+    """A bar square at the baseline with a 4px rounded data end."""
+    r = min(4, w / 2, h / 2)
+    if w <= 0:
+        return ""
+    return (f'<path d="M{x},{y} H{x + w - r} Q{x + w},{y} {x + w},{y + r} V{y + h - r} '
+            f'Q{x + w},{y + h} {x + w - r},{y + h} H{x} Z" fill="{color}"/>')
+
+
+def chart(med, metric, title, subtitle, fmt, theme):
+    t = THEMES[theme]
+    width, left, bar_x, bar_max = 820, 24, 220, 470
+    row_h, bar_h, panel_gap = 30, 18, 22
+    head = 78
+    panel_h = 34 + row_h * len(METHODS)
+    height = head + len(REPOS) * panel_h + (len(REPOS) - 1) * panel_gap + 40
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+           f'viewBox="0 0 {width} {height}" font-family="{FONT}">',
+           f'<rect width="{width}" height="{height}" fill="{t["bg"]}"/>',
+           f'<text x="{left}" y="34" font-size="18" font-weight="600" fill="{t["text"]}">{esc(title)}</text>',
+           f'<text x="{left}" y="58" font-size="13" fill="{t["muted"]}">{esc(subtitle)}</text>']
+    y = head
+    for repo in REPOS:
+        vals = [med[(repo, m)][metric] for m, _ in METHODS]
+        top = max(vals)
+        files = med[(repo, "full")]["files"]
+        out.append(f'<text x="{left}" y="{y + 16}" font-size="14" font-weight="600" fill="{t["text"]}">'
+                   f'{esc(repo)}</text>')
+        out.append(f'<text x="{width - 24}" y="{y + 16}" font-size="13" text-anchor="end" fill="{t["muted"]}">'
+                   f'{files:,} files</text>')
+        ry = y + 30
+        out.append(f'<line x1="{bar_x}" y1="{ry - 4}" x2="{bar_x}" y2="{ry + row_h * len(METHODS) - 8}" '
+                   f'stroke="{t["rule"]}" stroke-width="1"/>')
+        for (method, label), v in zip(METHODS, vals):
+            color = t["gvc"] if method == "gvc" else t["git"]
+            w = max(2, bar_max * v / top)
+            out.append(f'<text x="{bar_x - 12}" y="{ry + bar_h - 4}" font-size="13" font-family="{MONO}" '
+                       f'text-anchor="end" fill="{t["text"]}">{esc(label)}</text>')
+            out.append(bar(bar_x, ry, w, bar_h, color))
+            out.append(f'<text x="{bar_x + w + 8}" y="{ry + bar_h - 4}" font-size="13" '
+                       f'font-weight="{600 if method == "gvc" else 400}" fill="{t["text"]}" '
+                       f'style="font-variant-numeric: tabular-nums">{esc(fmt(v))}</text>')
+            ry += row_h
+        y += panel_h + panel_gap
+    out.append(f'<text x="{left}" y="{height - 16}" font-size="12" fill="{t["muted"]}">'
+               f'* gvc isn\'t built yet: this bar times the git and GitHub API calls gvc clone will make. '
+               f'Files then download on first read.</text>')
+    out.append("</svg>")
+    return "\n".join(out) + "\n"
+
+
+def main():
+    med = load()
+    os.makedirs(OUT, exist_ok=True)
+    full_runs = med[("torvalds/linux", "full")]["runs"]
+    charts = {
+        "clone-time": ("Time to a usable checkout",
+                       f"Median seconds over 3 runs ({full_runs} for the Linux full clone), on tmpfs. "
+                       "Each repo has its own scale.", "seconds", fmt_s),
+        "clone-data": ("Data downloaded",
+                       "Median bytes received: the packs, plus the tree API's gzipped JSON for gvc. Each repo has its own scale.",
+                       "downloaded", fmt_b),
+    }
+    for name, (title, subtitle, metric, fmt) in charts.items():
+        for theme in THEMES:
+            with open(os.path.join(OUT, f"{name}-{theme}.svg"), "w") as f:
+                f.write(chart(med, metric, title, subtitle, fmt, theme))
+
+    print("| Repo | Files | Method | Time | Downloaded | On disk |")
+    print("|---|--:|---|--:|--:|--:|")
+    for repo in REPOS:
+        for method, label in METHODS:
+            m = med[(repo, method)]
+            print(f"| {repo} | {m['files']:,} | `{label.rstrip(' *')}` | {fmt_s(m['seconds'])} | "
+                  f"{fmt_b(m['downloaded'])} | {fmt_b(m['on_disk'])} |")
+
+
+if __name__ == "__main__":
+    main()

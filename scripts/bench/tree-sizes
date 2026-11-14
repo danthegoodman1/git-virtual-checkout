@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Fetch every path, mode, oid and blob size of a commit's tree from GitHub's REST tree API.
+
+This is the size lookup `gvc clone` makes beside its blobless fetch. A recursive call stops at
+100,000 entries or 7 MB; when one comes back truncated, this lists that tree's direct children
+and fetches each subtree recursively, in parallel.
+
+Usage: tree-sizes OWNER/REPO COMMIT_SHA
+Prints one JSON object: blobs, trees, bytes (sum of blob sizes), API calls made, and the
+gzip-compressed bytes received.
+The token comes from GITHUB_TOKEN, or from `gh auth token`.
+"""
+import gzip
+import json
+import os
+import threading
+import subprocess
+import sys
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+
+def token():
+    t = os.environ.get("GITHUB_TOKEN")
+    if t:
+        return t
+    return subprocess.check_output(["gh", "auth", "token"], text=True).strip()
+
+
+class Client:
+    def __init__(self, repo):
+        self.repo = repo
+        self.headers = {
+            "Authorization": f"Bearer {token()}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "gvc-bench",
+            "Accept-Encoding": "gzip",
+        }
+        self.calls = 0
+        self.received = 0
+        self.lock = threading.Lock()
+
+    def tree(self, sha, recursive):
+        with self.lock:
+            self.calls += 1
+        url = f"https://api.github.com/repos/{self.repo}/git/trees/{sha}"
+        if recursive:
+            url += "?recursive=1"
+        req = urllib.request.Request(url, headers=self.headers)
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read()
+            gzipped = resp.headers.get("Content-Encoding") == "gzip"
+        with self.lock:
+            self.received += len(raw)
+        return json.loads(gzip.decompress(raw) if gzipped else raw)
+
+
+def walk(client, pool, sha, prefix):
+    """Return {path: entry} for every entry under the tree `sha`."""
+    data = client.tree(sha, recursive=True)
+    if not data["truncated"]:
+        return {prefix + e["path"]: e for e in data["tree"]}
+    top = client.tree(sha, recursive=False)
+    out = {prefix + e["path"]: e for e in top["tree"]}
+    subtrees = [e for e in top["tree"] if e["type"] == "tree"]
+    futures = [pool.submit(walk, client, pool, e["sha"], prefix + e["path"] + "/") for e in subtrees]
+    for f in futures:
+        out.update(f.result())
+    return out
+
+
+def main():
+    repo, commit = sys.argv[1], sys.argv[2]
+    client = Client(repo)
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        entries = walk(client, pool, commit, "")
+    blobs = [e for e in entries.values() if e["type"] == "blob"]
+    print(json.dumps({
+        "blobs": len(blobs),
+        "trees": sum(1 for e in entries.values() if e["type"] == "tree"),
+        "bytes": sum(e.get("size", 0) for e in blobs),
+        "calls": client.calls,
+        "received": client.received,
+    }))
+
+
+if __name__ == "__main__":
+    main()

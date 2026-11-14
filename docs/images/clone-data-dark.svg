@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="534" viewBox="0 0 820 534" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<rect width="820" height="534" fill="#0d1117"/>
+<text x="24" y="34" font-size="18" font-weight="600" fill="#f0f6fc">Data downloaded</text>
+<text x="24" y="58" font-size="13" fill="#9198a1">Median bytes received: the packs, plus the tree API's gzipped JSON for gvc. Each repo has its own scale.</text>
+<text x="24" y="94" font-size="14" font-weight="600" fill="#f0f6fc">torvalds/linux</text>
+<text x="796" y="94" font-size="13" text-anchor="end" fill="#9198a1">97,371 files</text>
+<line x1="220" y1="104" x2="220" y2="190" stroke="#3d444d" stroke-width="1"/>
+<text x="208" y="122" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">git clone</text>
+<path d="M220,108 H686.0 Q690.0,108 690.0,112 V122 Q690.0,126 686.0,126 H220 Z" fill="#6e7681"/>
+<text x="698.0" y="122" font-size="13" font-weight="400" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">6.6 GB</text>
+<text x="208" y="152" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">git clone --depth=1</text>
+<path d="M220,138 H237.56471070432107 Q241.56471070432107,138 241.56471070432107,142 V152 Q241.56471070432107,156 237.56471070432107,156 H220 Z" fill="#6e7681"/>
+<text x="249.56471070432107" y="152" font-size="13" font-weight="400" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">304 MB</text>
+<text x="208" y="182" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">gvc clone *</text>
+<path d="M220,168 H221.0 Q222,168 222,169.0 V185.0 Q222,186 221.0,186 H220 Z" fill="#3987e5"/>
+<text x="230" y="182" font-size="13" font-weight="600" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">11.1 MB</text>
+<text x="24" y="240" font-size="14" font-weight="600" fill="#f0f6fc">facebook/react</text>
+<text x="796" y="240" font-size="13" text-anchor="end" fill="#9198a1">7,275 files</text>
+<line x1="220" y1="250" x2="220" y2="336" stroke="#3d444d" stroke-width="1"/>
+<text x="208" y="268" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">git clone</text>
+<path d="M220,254 H686.0 Q690.0,254 690.0,258 V268 Q690.0,272 686.0,272 H220 Z" fill="#6e7681"/>
+<text x="698.0" y="268" font-size="13" font-weight="400" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">1.2 GB</text>
+<text x="208" y="298" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">git clone --depth=1</text>
+<path d="M220,284 H222.25788043225006 Q224.51576086450012,284 224.51576086450012,286.25788043225003 V299.74211956774997 Q224.51576086450012,302 222.25788043225006,302 H220 Z" fill="#6e7681"/>
+<text x="232.51576086450012" y="298" font-size="13" font-weight="400" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">11.4 MB</text>
+<text x="208" y="328" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">gvc clone *</text>
+<path d="M220,314 H221.0 Q222,314 222,315.0 V331.0 Q222,332 221.0,332 H220 Z" fill="#3987e5"/>
+<text x="230" y="328" font-size="13" font-weight="600" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">642 KB</text>
+<text x="24" y="386" font-size="14" font-weight="600" fill="#f0f6fc">danthegoodman1/lionturtle</text>
+<text x="796" y="386" font-size="13" text-anchor="end" fill="#9198a1">83 files</text>
+<line x1="220" y1="396" x2="220" y2="482" stroke="#3d444d" stroke-width="1"/>
+<text x="208" y="414" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">git clone</text>
+<path d="M220,400 H686.0 Q690.0,400 690.0,404 V414 Q690.0,418 686.0,418 H220 Z" fill="#6e7681"/>
+<text x="698.0" y="414" font-size="13" font-weight="400" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">5.7 MB</text>
+<text x="208" y="444" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">git clone --depth=1</text>
+<path d="M220,430 H355.9732440640897 Q359.9732440640897,430 359.9732440640897,434 V444 Q359.9732440640897,448 355.9732440640897,448 H220 Z" fill="#6e7681"/>
+<text x="367.9732440640897" y="444" font-size="13" font-weight="400" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">1.7 MB</text>
+<text x="208" y="474" font-size="13" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" text-anchor="end" fill="#f0f6fc">gvc clone *</text>
+<path d="M220,460 H221.0 Q222,460 222,461.0 V477.0 Q222,478 221.0,478 H220 Z" fill="#3987e5"/>
+<text x="230" y="474" font-size="13" font-weight="600" fill="#f0f6fc" style="font-variant-numeric: tabular-nums">10.5 KB</text>
+<text x="24" y="518" font-size="12" fill="#9198a1">* gvc isn't built yet: this bar times the git and GitHub API calls gvc clone will make. Files then download on first read.</text>
+</svg>

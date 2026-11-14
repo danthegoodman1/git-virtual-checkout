@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Times three ways to get a usable checkout of each GitHub repo:
+#   full     git clone
+#   shallow  git clone --depth=1 --single-branch
+#   gvc      what `gvc clone` will do: ls-refs, then a blobless depth-1 fetch with no checkout
+#            beside the REST tree API's size lookup (scripts/bench/tree-sizes), in parallel
+#
+# Usage: scripts/bench/clones [--runs N] [--full-runs N] [--methods "gvc shallow full"] [--work DIR] [--out FILE] OWNER/REPO...
+# Writes one JSON line per run. Put --work on tmpfs to take the disk out of the numbers.
+set -euo pipefail
+
+runs=3
+full_runs=""
+work="${TMPDIR:-/tmp}"
+out=/dev/stdout
+methods="gvc shallow full"
+repos=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runs) runs="$2"; shift 2 ;;
+    --full-runs) full_runs="$2"; shift 2 ;;
+    --work) work="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    --methods) methods="$2"; shift 2 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    *) repos+=("$1"); shift ;;
+  esac
+done
+full_runs="${full_runs:-$runs}"
+here="$(cd "$(dirname "$0")" && pwd)"
+dir="$(mktemp -d "$work/gvc-bench.XXXXXX")"
+trap 'rm -rf "$dir"' EXIT
+
+now() { date +%s.%N; }
+secs() { printf '%.3f' "$(echo "$1 - $2" | bc)"; }
+bytes() { du -sb "$1" | cut -f1; }
+
+record() { # repo method run seconds downloaded on_disk files extra-json
+  printf '{"repo":"%s","method":"%s","run":%d,"seconds":%s,"downloaded":%d,"on_disk":%d,"files":%d%s}\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "${8:-}" >> "$out"
+}
+
+for repo in "${repos[@]}"; do
+  url="https://github.com/$repo.git"
+  for method in $methods; do
+    n="$runs"; [[ "$method" == full ]] && n="$full_runs"
+    for ((i = 1; i <= n; i++)); do
+      dest="$dir/$method"
+      rm -rf "$dest"
+      case "$method" in
+        full)
+          t0=$(now); git clone -q "$url" "$dest"; t1=$(now)
+          record "$repo" full "$i" "$(secs "$t1" "$t0")" "$(bytes "$dest/.git/objects/pack")" \
+            "$(bytes "$dest")" "$(git -C "$dest" ls-files | wc -l)"
+          ;;
+        shallow)
+          t0=$(now); git clone -q --depth=1 --single-branch "$url" "$dest"; t1=$(now)
+          record "$repo" shallow "$i" "$(secs "$t1" "$t0")" "$(bytes "$dest/.git/objects/pack")" \
+            "$(bytes "$dest")" "$(git -C "$dest" ls-files | wc -l)"
+          ;;
+        gvc)
+          t0=$(now)
+          sha=$(git ls-remote "$url" HEAD | cut -f1)
+          t_refs=$(now)
+          git clone -q --filter=blob:none --depth=1 --no-checkout --single-branch "$url" "$dest" &
+          clone_pid=$!
+          sizes=$(python3 -I "$here/tree-sizes" "$repo" "$sha")
+          t_sizes=$(now)
+          wait "$clone_pid"
+          t1=$(now)
+          files=$(echo "$sizes" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["blobs"])')
+          calls=$(echo "$sizes" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["calls"])')
+          api=$(echo "$sizes" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["received"])')
+          pack=$(bytes "$dest/.git/objects/pack")
+          # Downloaded counts the pack and the tree API's gzipped JSON.
+          record "$repo" gvc "$i" "$(secs "$t1" "$t0")" "$((pack + api))" \
+            "$(bytes "$dest")" "$files" \
+            ",\"ls_refs_s\":$(secs "$t_refs" "$t0"),\"sizes_s\":$(secs "$t_sizes" "$t_refs"),\"api_calls\":$calls,\"pack_bytes\":$pack,\"api_bytes\":$api"
+          ;;
+      esac
+      rm -rf "$dest"
+    done
+  done
+done
