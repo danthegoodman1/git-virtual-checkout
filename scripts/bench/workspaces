@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Creates N workspaces of a GitHub repo with a stock git setup, times it, then replays one
+# agent session (scripts/bench/agent-replay) in the first workspace.
+#
+# Usage: scripts/bench/workspaces SETUP REPO N --work DIR [--out FILE] [--no-session]
+#   SETUP shallow   N parallel `git clone --depth=1 --single-branch`
+#   SETUP worktree  one `git clone --filter=blob:none --depth=1 --no-checkout`, then N
+#                   `git worktree add`; the first fetches the commit's blobs, the rest reuse them
+# Writes one JSON line for the setup and one per session step.
+set -euo pipefail
+
+setup="$1"; repo="$2"; n="$3"; shift 3
+work="${TMPDIR:-/tmp}"; out=/dev/stdout; session=1
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --work) work="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    --no-session) session=0; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+here="$(cd "$(dirname "$0")" && pwd)"
+url="https://github.com/$repo.git"
+dir="$(mktemp -d "$work/gvc-ws.XXXXXX")"
+trap 'rm -rf "$dir"' EXIT
+now() { date +%s.%N; }
+secs() { printf '%.3f' "$(echo "$1 - $2" | bc)"; }
+packs() { find "$@" -path '*objects/pack/*.pack' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}'; }
+
+added=()
+t0=$(now)
+case "$setup" in
+  shallow)
+    pids=()
+    for ((i = 1; i <= n; i++)); do
+      git clone -q --depth=1 --single-branch "$url" "$dir/ws$i" & pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p"; done
+    t1=$(now); first=$(secs "$t1" "$t0")
+    downloaded=$(packs "$dir")
+    ;;
+  worktree)
+    git clone -q --filter=blob:none --depth=1 --no-checkout --single-branch "$url" "$dir/base"
+    for ((i = 1; i <= n; i++)); do
+      a=$(now); git -C "$dir/base" worktree add -q --detach "$dir/ws$i" HEAD; b=$(now)
+      [[ $i -eq 1 ]] && first=$(secs "$b" "$t0") || added+=("$(secs "$b" "$a")")
+    done
+    t1=$(now)
+    downloaded=$(packs "$dir/base")
+    ;;
+  *) echo "unknown setup: $setup" >&2; exit 2 ;;
+esac
+ready=$(secs "$t1" "$t0")
+disk=$(du -sb "$dir" | cut -f1)
+per_added=$(printf '%s\n' "${added[@]:-}" | sort -n | awk 'NF {a[n++]=$1} END {print (n ? a[int(n/2)] : "null")}')
+printf '{"setup":"%s","repo":"%s","workspaces":%d,"ready_s":%s,"first_ready_s":%s,"per_added_s":%s,"downloaded":%d,"disk":%d}\n' \
+  "$setup" "$repo" "$n" "$ready" "$first" "$per_added" "$downloaded" "$disk" >> "$out"
+
+if [[ $session -eq 1 ]]; then
+  "$here/agent-replay" "$repo" "$dir/ws1" --out "$out" --label "$setup"
+fi

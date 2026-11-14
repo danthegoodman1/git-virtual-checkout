@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Estimate G1 from measured parts: stock setups measured end to end, gvc assembled from the
+pieces it will run, each measured on its own (docs/bench/*.jsonl).
+
+  gvc ready, 1 workspace   bootstrap stand-in (clones.jsonl) + adding a workspace (index write)
+  gvc ready, 8 workspaces  bootstrap + 8 index writes, sharing one store
+  gvc session, cold        each step's fetches (gvc-fetch.jsonl) + its local work through FUSE
+                           with zero-message opens (fuse.jsonl), or stock's time for steps that
+                           touch only edited files
+  gvc session, warm        the same session in a second workspace: the store already holds it
+
+Usage: scripts/bench/g1-estimate [DIR]   (DIR defaults to docs/bench)
+"""
+import json
+import os
+import statistics
+import sys
+from collections import defaultdict
+
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+D = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "docs/bench")
+REPOS = ["torvalds/linux", "facebook/react", "danthegoodman1/lionturtle"]
+STEPS = ["status", "deepen", "log", "reads", "greps", "edit", "diff", "show-commit", "show-file", "commit"]
+
+
+def rows(name):
+    path = os.path.join(D, name)
+    return [json.loads(l) for l in open(path)] if os.path.exists(path) else []
+
+
+def med(xs):
+    return statistics.median(xs) if xs else None
+
+
+def fmt_s(s):
+    return "—" if s is None else (f"{s:.2f} s" if s < 10 else f"{s:.0f} s")
+
+
+def fmt_b(b):
+    if b is None:
+        return "—"
+    for unit, size in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if b >= size:
+            return f"{b / size:.1f} {unit}"
+    return f"{b:.0f} B"
+
+
+def main():
+    clones = rows("clones.jsonl")
+    setups, sessions = {}, defaultdict(dict)
+    for f in ("agents-stock.jsonl", "agents-sessions.jsonl"):  # later files win
+        for r in rows(f):
+            if "setup" in r:
+                setups[(r["repo"], r["setup"], r["workspaces"])] = r
+            elif "step" in r:
+                sessions[(r["repo"], r["label"])][r["step"]] = r["seconds"]
+    fuse = defaultdict(dict)
+    for r in rows("fuse.jsonl"):
+        fuse[(r["repo"], r["where"])][r["step"]] = r
+    # gvc-fetch.jsonl holds several runs; each step takes its median time and bytes.
+    runs = defaultdict(lambda: defaultdict(list))
+    for r in rows("gvc-fetch.jsonl"):
+        runs[r["repo"]][r["step"]].append(r)
+    fetch = defaultdict(dict)
+    for repo, steps in runs.items():
+        for step, rs in steps.items():
+            fetch[repo][step] = {"seconds": med([r["seconds"] for r in rs]), "bytes": med([r["bytes"] for r in rs]),
+                                 "runs": [r["seconds"] for r in rs]}
+
+    verdicts = []
+    for repo in REPOS:
+        boot = [r for r in clones if r["repo"] == repo and r["method"] == "gvc"]
+        if not boot or repo not in fetch:
+            print(f"## {repo}\n\nMissing measurements.\n")
+            continue
+        boot_s = med([r["seconds"] for r in boot])
+        boot_b = med([r["downloaded"] for r in boot])
+        boot_disk = med([r["on_disk"] for r in boot])
+        fx = fetch[repo]
+        add_s, index_b = fx["add-workspace"]["seconds"], fx["add-workspace"]["bytes"]
+        fz = fuse.get((repo, "fuse+no-open+readdirplus")) or fuse.get((repo, "fuse+no-open")) or fuse.get((repo, "fuse"), {})
+        stock_local = sessions.get((repo, "worktree")) or sessions.get((repo, "shallow")) or {}
+        nat = fuse.get((repo, "native"), {})
+
+        g = {"ready1": boot_s + add_s, "ready8": boot_s + 8 * add_s,
+             "bytes1": boot_b, "bytes8": boot_b, "disk8": boot_disk + 8 * index_b}
+        cold = {
+            "status": fz["status-fsmonitor"]["median_s"],
+            "deepen": 0.0,  # the window downloads in the background
+            "log": fx["log"]["seconds"],
+            "reads": fx["read-ahead"]["seconds"] + fz["reads"]["first_s"],
+            "greps": fx["grep-dirs"]["seconds"] + fz["greps"]["first_s"],
+            "edit": stock_local.get("edit", 0.0),
+            "diff": stock_local.get("diff", 0.0),
+            "show-commit": fx["show-commit"]["seconds"],
+            "show-file": fx["show-file"]["seconds"],
+            "commit": stock_local.get("commit", 0.0),
+        }
+        warm = dict(cold, reads=fz["reads"]["median_s"], greps=fz["greps"]["median_s"],
+                    **{"show-commit": stock_local.get("show-commit", 0.0), "show-file": stock_local.get("show-file", 0.0)})
+        g["session_cold"] = sum(cold.values())
+        g["session_warm"] = sum(warm.values())
+        g["whole_cold"] = fx["tarball"]["seconds"] + fz["grep-whole"]["first_s"]
+        g["whole_warm"] = fz["grep-whole"]["median_s"]
+        g["session_bytes"] = fx["read-ahead"]["bytes"] + fx["grep-dirs"]["bytes"] + fx["show-commit"]["bytes"] + fx["show-file"]["bytes"]
+        g["tarball_bytes"] = fx["tarball"]["bytes"]
+
+        st = {}
+        for s in ("shallow", "worktree"):
+            one, eight = setups.get((repo, s, 1)), setups.get((repo, s, 8))
+            ses = sessions.get((repo, s), {})
+            st[s] = {
+                "ready1": one and one["ready_s"], "ready8": eight and eight["ready_s"],
+                "bytes1": one and one["downloaded"], "bytes8": eight and eight["downloaded"],
+                "disk8": eight and eight["disk"],
+                # Greps are local and identical under both stock setups: take them from the
+                # native runs in fuse.jsonl, which pipe grep's output as an agent's tool would.
+                "session": (sum(ses.get(k, 0.0) for k in STEPS if k != "greps") + nat["greps"]["median_s"]) if ses else None,
+                "whole": nat["grep-whole"]["median_s"],
+            }
+        best = lambda k: min((v[k] for v in st.values() if v[k] is not None), default=None)
+
+        print(f"## {repo}\n")
+        print("| Measure | `git clone --depth=1` each | blobless clone + worktrees | gvc, estimated |")
+        print("|---|--:|--:|--:|")
+        lines = [
+            ("Ready, 1 workspace", "ready1", fmt_s),
+            ("Ready, 8 workspaces", "ready8", fmt_s),
+            ("Downloaded, 1 workspace", "bytes1", fmt_b),
+            ("Downloaded, 8 workspaces", "bytes8", fmt_b),
+            ("Disk, 8 workspaces", "disk8", fmt_b),
+        ]
+        for label, k, f in lines:
+            print(f"| {label} | {f(st['shallow'][k])} | {f(st['worktree'][k])} | {f(g[k])} |")
+        print(f"| Session, back to back (cold / warm) | {fmt_s(st['shallow']['session'])} | {fmt_s(st['worktree']['session'])} | "
+              f"{fmt_s(g['session_cold'])} / {fmt_s(g['session_warm'])} |")
+        print(f"| Whole-tree grep (cold / warm) | {fmt_s(st['shallow']['whole'])} | {fmt_s(st['worktree']['whole'])} | "
+              f"{fmt_s(g['whole_cold'])} / {fmt_s(g['whole_warm'])} |")
+        print(f"| Session downloads beyond the bootstrap | — | — | {fmt_b(g['session_bytes'])}, or {fmt_b(g['tarball_bytes'])} once the tree is streamed in |")
+        print()
+
+        # End to end, one cold workspace: ready, then the session, then a whole-tree grep.
+        e2e_stock = min(v["ready1"] + v["session"] + (v["whole"] or 0) for v in st.values() if v["ready1"] and v["session"] is not None)
+        e2e_gvc = g["ready1"] + g["session_cold"] + g["whole_cold"]
+        e2e_gvc_noscan = g["ready1"] + g["session_cold"]
+        e2e_stock_noscan = min(v["ready1"] + v["session"] for v in st.values() if v["ready1"] and v["session"] is not None)
+        # Background hydration starts when the workspace is ready; a grep 5 s later waits for it.
+        t_scan = 5.0
+        gvc_scan = g["ready1"] + t_scan + max(0.0, g["whole_cold"] - fz["grep-whole"]["first_s"] - t_scan) + fz["grep-whole"]["first_s"]
+        stock_scan = min(v["ready1"] for v in st.values() if v["ready1"]) + t_scan + nat["grep-whole"]["median_s"]
+        verdicts.append((repo, {
+            "scan5": (stock_scan, gvc_scan),
+            "ready_1x": best("ready1") / g["ready1"],
+            "ready_8x": best("ready8") / g["ready8"],
+            "bytes_8x": best("bytes8") / g["bytes8"],
+            "e2e_scan_ratio": e2e_gvc / e2e_stock,
+            "e2e_noscan_ratio": e2e_gvc_noscan / e2e_stock_noscan,
+            "e2e": (e2e_stock, e2e_gvc, e2e_stock_noscan, e2e_gvc_noscan),
+        }))
+
+    print("## Criteria\n")
+    print("Cold sessions run back to back with no think time. The last column has the session's")
+    print("whole-tree grep 5 s after the workspace is ready, the 10th percentile in agent traces,")
+    print("while gvc streams the tree in the background from the moment it's ready.\n")
+    print("| Repo | Ready, 1 workspace | Ready, 8 workspaces | Bytes, 8 workspaces | Cold session, no whole-tree grep | Cold session with a whole-tree grep | Whole-tree grep 5 s after ready |")
+    print("|---|--:|--:|--:|--:|--:|--:|")
+    for repo, v in verdicts:
+        e = v["e2e"]
+        print(f"| {repo} | {v['ready_1x']:.1f}× faster | {v['ready_8x']:.1f}× faster | {v['bytes_8x']:.0f}× fewer | "
+              f"{fmt_s(e[3])} vs {fmt_s(e[2])} ({v['e2e_noscan_ratio']:.2f}×) | {fmt_s(e[1])} vs {fmt_s(e[0])} ({v['e2e_scan_ratio']:.2f}×) | "
+              f"{fmt_s(v['scan5'][1])} vs {fmt_s(v['scan5'][0])} ({v['scan5'][1] / v['scan5'][0]:.2f}×) |")
+
+
+if __name__ == "__main__":
+    main()

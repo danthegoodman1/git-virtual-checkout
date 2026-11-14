@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Measures what FUSE adds to an agent session's local work on a fully downloaded checkout.
+# Each step runs on the checkout itself and through bench/passfs, a read-only FUSE
+# passthrough with hour-long kernel caching, as gvc can give its immutable lower layer.
+#
+# Usage: scripts/bench/fuse-overhead REPO CHECKOUT PASSFS_BIN [--runs N] [--out FILE]
+# CHECKOUT is a working tree with its .git directory, on tmpfs. Git runs with the .git
+# directory outside the mount and core.checkStat=minimal, as under gvc. Greps leave out
+# .git, which a gvc mount holds as a one-line file. Grep output goes to a pipe, since GNU grep
+# stops at the first match when it writes to /dev/null. PASSFS_NO_OPEN=1 and PASSFS_READDIRPLUS=1
+# pass through to passfs, and the "where" field names them.
+set -euo pipefail
+
+repo="$1"; checkout="$(cd "$2" && pwd)"; passfs="$3"; shift 3
+runs=3; out=/dev/stdout
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runs) runs="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+[[ "$out" == /* || "$out" == /dev/stdout ]] || out="$PWD/$out"
+here="$(cd "$(dirname "$0")" && pwd)"
+source "$here/session-config"
+
+mnt="$(mktemp -d "${TMPDIR:-/tmp}/gvc-mnt.XXXXXX")"
+hook="$(mktemp "${TMPDIR:-/tmp}/gvc-fsmonitor.XXXXXX")"
+# An fsmonitor hook (protocol v2) that reports no changes, as gvc's would on a clean tree.
+printf '#!/bin/sh\nprintf "gvc-bench\\0"\n' > "$hook"; chmod +x "$hook"
+cleanup() { fusermount3 -u "$mnt" 2>/dev/null || true; rmdir "$mnt" 2>/dev/null || true; rm -f "$hook"; }
+trap cleanup EXIT
+
+gitc=(git -c core.checkStat=minimal -c core.trustctime=false --git-dir="$checkout/.git")
+mapfile -t files < <("${gitc[@]}" --work-tree="$checkout" ls-files -- $read_dirs | grep -E "$read_ext" | head -30)
+
+now() { date +%s.%N; }
+measure() { # where step command...
+  local where="$1" name="$2"; shift 2
+  local times=() t0 t1
+  for ((i = 0; i < runs; i++)); do
+    t0=$(now); "$@" >/dev/null 2>&1 || true; t1=$(now)
+    times+=("$(echo "$t1 - $t0" | bc)")
+  done
+  local med; med=$(printf '%s\n' "${times[@]}" | sort -n | awk '{a[n++]=$1} END {print a[int(n/2)]}')
+  local first="${times[0]}"
+  printf '{"repo":"%s","where":"%s","step":"%s","first_s":%.4f,"median_s":%.4f}\n' \
+    "$repo" "$where" "$name" "$first" "$med" >> "$out"
+}
+
+run_steps() { # where root
+  local where="$1" root="$2"
+  local g=("${gitc[@]}" --work-tree="$root")
+  "${g[@]}" status --porcelain >/dev/null 2>&1 || true   # settle the index's stat data
+  measure "$where" find bash -c "cd '$root' && find . -path ./.git -prune -o -type f -print | wc -l"
+  measure "$where" status "${g[@]}" status --porcelain
+  "${g[@]}" -c core.fsmonitor="$hook" -c core.untrackedCache=true status --porcelain >/dev/null 2>&1 || true
+  measure "$where" status-fsmonitor "${g[@]}" -c core.fsmonitor="$hook" -c core.untrackedCache=true status --porcelain
+  measure "$where" reads bash -c "cd '$root' && for f in $(printf '%q ' "${files[@]}"); do sed -n '1,200p' \"\$f\"; done"
+  local greps=""
+  for gs in "${grep_scoped[@]}"; do greps+="grep -rn $(printf '%q' "${gs% *}") ${gs##* } | wc -l; "; done
+  measure "$where" greps bash -c "cd '$root' && { $greps } ; true"
+  measure "$where" grep-whole bash -c "cd '$root' && grep -rn --exclude-dir=.git $(printf '%q' "$grep_whole") . | wc -l"
+}
+
+run_steps native "$checkout"
+"$passfs" "$checkout" "$mnt" 8 &
+for _ in $(seq 50); do mountpoint -q "$mnt" && break; sleep 0.1; done
+mountpoint -q "$mnt" || { echo "mount failed" >&2; exit 1; }
+mode=fuse; [[ "${PASSFS_NO_OPEN:-}" == 1 ]] && mode+="+no-open"; [[ "${PASSFS_READDIRPLUS:-}" == 1 ]] && mode+="+readdirplus"
+run_steps "$mode" "$mnt"

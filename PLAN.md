@@ -171,11 +171,12 @@ Goal:
 
 Scope:
 - 2A `gvc-vfs`: the `Filesystem` trait and its types; async completion; node lookup counts and forgets; invalidation events; an optional caller context (pid on Linux); errno mapping.
-- 2B `gvc-fuse`: serves any `Filesystem` through `fuser` 0.18 with multi-threaded dispatch and async replies, `default_permissions`, entry and attr timeouts, `keep_cache`, and clean unmount.
+- 2B `gvc-fuse`: serves any `Filesystem` through `fuser` 0.18 with multi-threaded dispatch and async replies, `default_permissions`, entry and attr timeouts, `keep_cache`, zero-message opens (`FUSE_NO_OPEN_SUPPORT`) and `readdirplus` for lower-layer files, and clean unmount. Without zero-message opens, every open and release reached the daemon, and react's `find` ran 6.4× slower than native; with them, warm runs matched native.
 - 2C `gvc-overlay` lower layer: a compact in-memory tree index (interned names, sorted children, mode, oid, size), stable inode numbers, a fixed timestamp from the commit, symlinks prefetched in one batch at clone, executable bits, submodules as empty directories.
 - 2D `gvc clone`: `ls-refs`, then `git clone --filter=blob:none --depth=1 --no-checkout` for `.git` beside the size walk, with the mount up at once. A lookup waits only on its own directory: a directory not yet listed comes from one non-recursive tree-API call while the full listing loads. git commands work once the full listing and the index land.
 - 2E Read path: first read fetches through the coalescer into the store; a miss also queues its directory's unread blobs, up to a size bound, so a search that reads files one at a time still fetches in batches; failures surface as `EIO` with a logged cause; reads offline fail fast.
-- 2G Whole-tree scans: when reads sweep across directories, gvc streams the commit's tarball into the store, checking each file against its tree oid, so a whole-tree grep costs about one shallow clone, once per commit for every workspace that shares the store.
+- 2G Whole-tree scans: when reads sweep across directories, gvc streams the commit's tarball into the store, checking each file against its tree oid, so a whole-tree grep costs less than one shallow clone, once per commit for every workspace that shares the store. On Linux the tarball downloaded and extracted in 10–14 s, against 24–37 s for `git clone --depth=1`.
+- 2H Small repositories: below a size threshold, gvc streams the whole tree in right after the bootstrap, since lazy reads save little there: react's tarball takes 1–2 s. G1 sets the threshold.
 - 2F `gvc mount`, `gvc unmount`, `gvc status`, and the daemon's lifecycle: one process per mount, a pid file, a control socket, all mounts sharing the store.
 
 Out of scope:
@@ -202,6 +203,7 @@ Status ledger:
 | Incomplete | Work | 2E: Read path and errors | Missing: read tests, including offline and failure injection. |
 | Incomplete | Work | 2F: Mount lifecycle commands | Missing: commands and lifecycle tests. |
 | Incomplete | Work | 2G: Scan detection and streamed hydration | Missing: detector, tarball path, and a whole-tree grep timed against `git clone --depth=1`. |
+| Incomplete | Work | 2H: Eager hydration below a size threshold | Missing: threshold from G1, and react timed against `git clone --depth=1`. |
 | Incomplete | Decision | One daemon per mount, sharing the on-disk store | Missing: confirmation once 2F runs two mounts. |
 | Incomplete | Gate | Linux root listed within 2 s and index written within 10 s; react's oids reproduced | Missing: timed run and verification log. |
 | Incomplete | Test | VFS conformance, direct and through FUSE | Missing: suite and CI job. |
@@ -219,8 +221,8 @@ Scope:
 - 3D fsmonitor hook (protocol v2): `gvc hook fsmonitor` asks the daemon over its socket; tokens come from the write log; an unknown token answers with a full rescan.
 - 3E Prefetch every `.gitignore` and `.gitattributes` blob at clone, since git reads them on every status.
 - 3F Zero-fetch accounting for untouched files across status, diff, add, commit and push.
-- 3G A recent history window: in the background after clone, `git fetch --filter=tree:0 --deepen=20`, so `git log -n` runs locally. On Linux that is 546 commits and 512 KB in 1.9 s; `--deepen=999` pulled all 1.47 million commits (804 MB), since depth counts generations through every merge.
-- 3H Build outputs at native speed: writes under ignored build directories (`target/`, `node_modules/`, `build/`, and any listed in config) go through FUSE passthrough to native files.
+- 3G A recent history window: in the background after clone, `git fetch --filter=blob:none --deepen=20`, so `git log -n` runs locally and `git show` of a recent commit fetches only its changed blobs. On Linux that is 546 commits with their trees, 5 MB in 2.7 s, and `git show --stat HEAD~3` then takes 0.26 s; a commits-only window (`--filter=tree:0`) left it at 10.5 s fetching whole trees. Depth counts generations through every merge, and `--deepen=999` pulled all 1.47 million commits (804 MB).
+- 3H Build outputs at native speed: ignored build directories (`target/`, `node_modules/`, `build/`, and any listed in config) are symlinks to native directories outside the mount. FUSE passthrough would serve them too, but Linux requires `CAP_SYS_ADMIN` to register a backing file, and unprivileged passthrough failed with `EPERM`; gvc uses it only when it has that capability.
 
 Out of scope:
 - Re-basing after checkout (Phase 4); LFS writes (Phase 5).
@@ -247,7 +249,7 @@ Status ledger:
 | Incomplete | Work | 3E: Ignore and attribute prefetch | Missing: prefetch and fetch-count test. |
 | Incomplete | Work | 3F: Zero-fetch accounting | Missing: counter assertions in every git differential scenario. |
 | Incomplete | Work | 3G: Recent history window | Missing: background deepen and a `git log -n 50` test with zero fetches. |
-| Incomplete | Work | 3H: Build outputs at native speed | Missing: passthrough for ignored build directories and a `cargo build` timed against a native checkout. |
+| Incomplete | Work | 3H: Build outputs at native speed | Missing: symlinked build directories and a `cargo build` timed against a native checkout. |
 | Incomplete | Decision | Overlay metadata store | Options: lionturtle, redb, or a journal of our own. Missing: choice and its crash-test results. |
 | Incomplete | Decision | Hard links in the working tree | Default: `EPERM`. Missing: a survey of tools that create them in checkouts. |
 | Incomplete | Gate | Differential scenarios pass with zero untouched fetches; crash recovery intact | Missing: CI run and crash-test log. |
@@ -269,21 +271,22 @@ Out of scope:
 Completion gate:
 A go needs every criterion; a miss on any is a no-go until a design change addresses it.
 - On Linux and react, a ready workspace at least 5× sooner than the best stock setup.
-- On Linux and react at 8 workspaces, at least 5× fewer bytes downloaded per added workspace.
+- On Linux and react, at least 5× fewer bytes downloaded to make 8 workspaces ready.
 - Every replayed session, including those with a whole-tree grep and a build, within 1.1× the best stock setup's wall time.
 - On lionturtle, within 1.1× the best stock setup on every measure.
 
 Testing plan:
-- Three runs per configuration on tmpfs against GitHub, reporting medians, with the commands in `BENCHMARKS.md`.
+- Three runs per configuration on tmpfs against GitHub, stock and gvc alternating, since GitHub's latency for one request ranged from 0.3 s to 28 s; medians, with the commands in `BENCHMARKS.md`.
+- A think-time variant with the whole-tree grep 5 s after the workspace is ready, the 10th percentile in agent traces.
 
 Status ledger:
 
 | Status | Type | Item | Evidence / Gap |
 | --- | --- | --- | --- |
-| Incomplete | Work | G1A: Agent replay on Phase 3's build | Missing: results in `BENCHMARKS.md`. |
-| Incomplete | Work | G1B: Comparison with the best stock setup | Missing: comparison table. |
-| Incomplete | Decision | G1C: Go or no-go | Missing: the decision and its evidence. |
-| Incomplete | Gate | All four go criteria met | Missing: recorded runs. |
+| In Progress | Work | G1A: Agent replay on Phase 3's build | A provisional estimate from measured parts is in `BENCHMARKS.md` (Agent workloads: the G1 estimate). Missing: the replay on a gvc build. |
+| In Progress | Work | G1B: Comparison with the best stock setup | Provisional: Linux meets every criterion (ready 8.5× sooner, 8 workspaces 11.5× sooner with 27× fewer bytes, sessions at 0.17–0.48× of stock's time). react misses two: ready only 2.2× sooner, and a session with an immediate whole-tree grep at 1.22×. lionturtle's immediate-grep session runs 1.16×. Missing: the same on a gvc build. |
+| Incomplete | Decision | G1C: Go or no-go | Missing: the decision. The provisional data favors a go for large repositories, with smaller ones hydrating in full at once (2H). |
+| Incomplete | Gate | All four go criteria met | Missing: recorded runs on a gvc build. |
 
 ## Phase 4: Moving between commits, worktrees and history
 
@@ -484,7 +487,7 @@ Scope:
   - warm sequential reads: at least 80% of stock throughput;
   - a full-tree read: at most files / 100 fetch requests;
   - daemon memory for a Linux mount: at most 150 MB.
-- 9C Optimizations: a size walk that issues every subtree call at once from the fetched trees; FUSE passthrough for upper and hydrated files; entry, attr and `readdirplus` caching; read-ahead and coalescing windows; HTTP/2 multiplexing; parallel tree parsing; a compact tree index; multiple FUSE channels; FUSE over io_uring where the kernel has it; fewer allocations per request.
+- 9C Optimizations: hedged fetches that retry a slow request on a second connection or through the CDN, since one 37-blob fetch took 0.3 s in one run and 28 s in another; a size walk that issues every subtree call at once from the fetched trees; FUSE passthrough for upper and hydrated files; entry, attr and `readdirplus` caching; read-ahead and coalescing windows; HTTP/2 multiplexing; parallel tree parsing; a compact tree index; multiple FUSE channels; FUSE over io_uring where the kernel has it; fewer allocations per request.
 - 9D Regression gates: instruction counts (`iai-callgrind`) for the hot paths on every PR; wall-clock benchmarks nightly with a tolerance.
 - 9E README, `BENCHMARKS.md` and charts regenerated from `gvc` runs in place of the git commands that stand in for it today.
 

@@ -88,12 +88,18 @@ it there.
   blob by oid into the shared cache. A single file comes from
   raw.githubusercontent.com in 20 ms (CDN hit) or 200 ms (miss), or from a
   git-protocol fetch in ~0.25 s. Lower-layer content never changes, so set
-  `FOPEN_KEEP_CACHE` and long entry and attr timeouts.
+  `FOPEN_KEEP_CACHE`, long entry and attr timeouts, zero-message opens
+  (`FUSE_NO_OPEN_SUPPORT`) and `readdirplus`. With those, a FUSE passthrough
+  matched native on warm runs over Linux and react; without zero-message opens,
+  every open and release reached the daemon and `find` ran 6.4× slower.
 - **Upper layer.** Edits copy up into a hidden local directory. Opening with
   `O_TRUNC` skips the fetch; any other write-open fetches first. Deletes become
   whiteouts. Keep the overlay as a path table in the daemon rather than an
-  overlayfs-style directory tree, which makes directory renames cheap. Use FUSE
-  passthrough (Linux 6.9+) so upper files read and write at native speed.
+  overlayfs-style directory tree, which makes directory renames cheap. FUSE
+  passthrough (Linux 6.9+) serves upper files at native speed, but Linux
+  requires `CAP_SYS_ADMIN` to register a backing file, so unprivileged gvc
+  makes ignored build directories (`target/`, `node_modules/`) symlinks to
+  native directories instead.
 - **Special entries.** Symlinks (mode `120000`) store the link target as blob
   content, so prefetch every symlink blob in one batch at clone time. Mode
   `100755` sets the execute bit. Submodules (`160000`) appear as empty
@@ -135,9 +141,9 @@ three levels:
    results. Prefer blobless. Until hydration finishes, the repo is shallow, so
    `git log` stops at HEAD and `merge-base` across the boundary fails. Linux is
    too large to hydrate: its commits alone are 804 MB. A window of recent
-   history is cheap, since `--deepen=20` brought 546 commits in 512 KB and
-   1.9 s, but depth counts generations through every merge, and
-   `--deepen=999` pulled every commit.
+   history is cheap: `--deepen=20` brought 546 commits in 512 KB and 1.9 s,
+   or with their trees, which `git show` needs, 5 MB in 2.7 s. Depth counts
+   generations through every merge, and `--deepen=999` pulled every commit.
 2. **A lazy object store (Phase 6) for repos too large to hydrate.** Point
    `.git/objects/info/alternates` at a second FUSE mount that materializes any
    loose object (`xx/yyyy…`) on lookup. The repo then has no shallow boundary,
@@ -316,8 +322,10 @@ traffic over the git protocol.
    `checkout -- path`) becomes minutes long. The lazy store (Phase 6) fixes
    this by batching and reading ahead behind one warm connection.
 2. **Full-tree readers.** `rg`, IDE indexers, `npm install`, and builds read
-   everything, and no lazy design avoids that. Offer `gvc hydrate`, which
-   streams the tarball, or `git backfill` (git 2.49+), which batch-fetches
+   everything, and no lazy design avoids that. Stream the commit's tarball when
+   reads sweep the tree: for Linux, downloading and extracting it took 10–14 s
+   against 24–37 s for `git clone --depth=1`. Offer `gvc hydrate`, which
+   streams it on request, or `git backfill` (git 2.49+), which batch-fetches
    blobs. Watch also for prefetch rules that hydrate too eagerly.
 3. **Attributes and filters.** Besides LFS (see "Git LFS"), conversions such
    as `eol`/`text`, `ident`, `working-tree-encoding`, and custom `filter=`
@@ -434,6 +442,8 @@ All runs used an authenticated `gh` token.
 | `git clone --depth=1` torvalds/linux | 40.4 s, 41.1 s, 36.3 s; 304 MB downloaded |
 | `git clone` torvalds/linux | 518 s; 6.6 GB downloaded |
 | `git fetch --filter=tree:0 --deepen=20` on a Linux depth-1 clone | 1.9 s; 512 KB; 546 commits |
+| `git fetch --filter=blob:none --deepen=20`, the same | 2.7 s; 5 MB; then `git show --stat HEAD~3` in 0.26 s, against 10.5 s after the commits-only window |
+| Linux, alternating: `git clone --depth=1` / tarball download and extract | 36.4, 36.9, 24.5 s / 10.1, 13.4, 14.2 s |
 | `git fetch --filter=tree:0 --deepen=999`, the same | Every commit: 1,468,845 commits, an 804 MB pack, about 6 minutes |
 | git/git full-history clones: treeless / blobless / full | 3.2 s, 37 MB / 6.1 s, 117 MB / 16.8 s, 323 MB |
 | Lazy fetch of one blob, Linux depth-1 clone | 7.3–14.2 s for the first three, then 0.23–0.28 s |

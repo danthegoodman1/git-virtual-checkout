@@ -1,0 +1,22 @@
+# Sourced by the agent benchmarks: sets the session's read directories, file pattern, scoped
+# greps and whole-tree grep for $repo. The first 30 matching files under read_dirs are the
+# files a session reads; the first three of them are the ones it edits.
+case "$repo" in
+  torvalds/linux)
+    read_dirs="kernel/sched include/linux/sched"; read_ext='\.(c|h)$'
+    grep_scoped=("pick_next_task kernel/sched" "struct rq kernel/sched" "sched_class include/linux"
+                 "cfs_rq kernel/sched" "task_struct include/linux/sched" "update_curr kernel/sched")
+    grep_whole="pick_next_task_fair" ;;
+  facebook/react)
+    read_dirs="packages/react-reconciler/src packages/shared"; read_ext='\.js$'
+    grep_scoped=("scheduleUpdateOnFiber packages/react-reconciler/src" "enableTransitionTracing packages/shared"
+                 "Lanes packages/react-reconciler/src" "useEffect packages/react/src"
+                 "commitRoot packages/react-reconciler/src" "REACT_ELEMENT_TYPE packages/shared")
+    grep_whole="scheduleUpdateOnFiber" ;;
+  danthegoodman1/lionturtle)
+    read_dirs="lionturtle/src"; read_ext='\.rs$'
+    grep_scoped=("checkpoint lionturtle/src" "fn put lionturtle/src" "Options lionturtle/src"
+                 "memtable lionturtle/src" "fsync lionturtle/src" "Snapshot lionturtle/src")
+    grep_whole="checkpoint_distance" ;;
+  *) echo "no session defined for $repo" >&2; exit 2 ;;
+esac

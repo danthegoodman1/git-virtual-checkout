@@ -1,0 +1,10 @@
+[package]
+name = "passfs"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Read-only FUSE passthrough that measures FUSE's overhead for scripts/bench/fuse-overhead"
+
+[dependencies]
+fuser = "0.18"
+libc = "0.2"

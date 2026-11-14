@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Replays an agent-shaped session in a workspace and times each step.
+#
+# Usage: scripts/bench/agent-replay REPO WORKSPACE [--out FILE] [--label LABEL]
+#
+# REPO is one of: torvalds/linux, facebook/react, danthegoodman1/lionturtle.
+# The session follows how agents used git and the shell in 29 local Claude Code sessions:
+# mostly line-range reads, recursive greps of named directories, `git status`, `git log -n`,
+# working-tree diffs, `git show`, a commit, and in most sessions one whole-tree grep.
+# A shallow workspace that lacks the history the session asks for deepens by 20 generations
+# first, as an agent would after the error; that fetch is timed as its own step.
+set -euo pipefail
+
+repo="$1"; ws="$2"; shift 2
+out=/dev/stdout; label=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out) out="$2"; shift 2 ;;
+    --label) label="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+here="$(cd "$(dirname "$0")" && pwd)"
+source "$here/session-config"
+[[ "$out" == /* ]] || out="$PWD/$out"
+
+cd "$ws"
+now() { date +%s.%N; }
+step() { # name command...
+  local name="$1"; shift
+  local t0 t1; t0=$(now)
+  "$@" >/dev/null 2>&1 || true
+  t1=$(now)
+  printf '{"label":"%s","repo":"%s","step":"%s","seconds":%s}\n' "$label" "$repo" "$name" \
+    "$(printf '%.3f' "$(echo "$t1 - $t0" | bc)")" >> "$out"
+}
+
+# The files this session reads: the first 30 source files under the task's directories.
+mapfile -t files < <(git ls-files -- $read_dirs | grep -E "$read_ext" | head -30)
+edits=("${files[0]}" "${files[1]}" "${files[2]}")
+
+reads() { for f in "${files[@]}"; do sed -n '1,200p' "$f"; done; }
+# Grep output goes to a pipe, as to an agent's tool; GNU grep stops at the first match when it
+# writes to /dev/null.
+greps() { for g in "${grep_scoped[@]}"; do grep -rn "${g% *}" ${g##* } | wc -l; done; }
+grep_whole() { grep -rn "$grep_whole" . | wc -l; }
+edit() { for f in "${edits[@]}"; do printf '\n/* agent edit */\n' >> "$f"; done; }
+deepen() {
+  if [[ -f "$(git rev-parse --git-common-dir)/shallow" ]] && ! git rev-parse -q --verify HEAD~5 >/dev/null; then
+    git fetch -q --deepen=20 origin
+  fi
+}
+commit() { git -c user.name=agent -c user.email=agent@example.com commit -qam "agent edit"; }
+
+step status git status --porcelain
+step deepen deepen
+step log git log -n 10 --oneline
+step reads reads
+step greps greps
+step edit edit
+step diff git diff
+step show-commit git show --stat HEAD~3
+step show-file git show "HEAD~5:${files[3]}"
+step commit commit
+step grep-whole grep_whole

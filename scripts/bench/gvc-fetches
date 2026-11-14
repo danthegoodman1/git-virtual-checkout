@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Measures the network and git work an agent session costs under gvc, using the .git that
+# `gvc clone` builds: a blobless depth-1 partial clone, plus a 20-generation window of commits
+# and trees.
+#
+# Usage: scripts/bench/gvc-fetches REPO --work DIR [--out FILE]
+# Steps:
+#   window        git fetch --filter=blob:none --deepen=20 (gvc runs it in the background); with
+#                 trees in the window, `git show` of a recent commit fetches only its changed blobs
+#   read-ahead    one batched fetch of every blob in the directories the session reads
+#   grep-dirs     one batched fetch of every blob under the directories it greps
+#   log, show-commit, show-file   the session's history steps, with git's own lazy fetches
+#   tarball       the commit's tarball, which gvc streams in when a scan sweeps the tree
+#   add-workspace git worktree add --no-checkout plus an index read from the trees, which is
+#                 what a second gvc workspace on the same commit costs; bytes is the index size
+set -euo pipefail
+
+repo="$1"; shift
+work="${TMPDIR:-/tmp}"; out=/dev/stdout
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --work) work="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+[[ "$out" == /* || "$out" == /dev/stdout ]] || out="$PWD/$out"
+here="$(cd "$(dirname "$0")" && pwd)"
+source "$here/session-config"
+url="https://github.com/$repo.git"
+dir="$(mktemp -d "$work/gvc-fetch.XXXXXX")"
+trap 'rm -rf "$dir"' EXIT
+now() { date +%s.%N; }
+packs() { find "$dir/r/.git/objects/pack" -name '*.pack' -printf '%s\n' | awk '{s+=$1} END {print s+0}'; }
+record() { # step seconds bytes [objects]
+  printf '{"repo":"%s","step":"%s","seconds":%.3f,"bytes":%d,"objects":%d}\n' "$repo" "$1" "$2" "$3" "${4:-0}" >> "$out"
+}
+timed_fetch() { # step  (oids on stdin)
+  local before after t0 t1 n
+  local oids; oids="$(cat)"; n=$(printf '%s\n' "$oids" | grep -c . || true)
+  before=$(packs); t0=$(now)
+  [[ $n -gt 0 ]] && printf '%s\n' "$oids" | git -C "$dir/r" -c fetch.negotiationAlgorithm=noop fetch -q origin \
+    --no-tags --no-write-fetch-head --recurse-submodules=no --filter=blob:none --stdin
+  t1=$(now); after=$(packs)
+  record "$1" "$(echo "$t1 - $t0" | bc)" $((after - before)) "$n"
+}
+lazy_step() { # step command...  (counts git's lazy fetches through trace2)
+  local name="$1"; shift
+  local before t0 t1 trace="$dir/trace-$name.json"
+  before=$(packs); t0=$(now)
+  GIT_TRACE2_EVENT="$trace" "$@" >/dev/null 2>&1 || true
+  t1=$(now)
+  local fetches; fetches=$(grep -c '"argv":\["git","-c","fetch.negotiationAlgorithm=noop","fetch"' "$trace" 2>/dev/null || true)
+  record "$name" "$(echo "$t1 - $t0" | bc)" $(( $(packs) - before )) "${fetches:-0}"
+}
+
+git clone -q --filter=blob:none --depth=1 --no-checkout --single-branch "$url" "$dir/r"
+cd "$dir/r"
+
+t0=$(now); before=$(packs)
+git fetch -q --filter=blob:none --deepen=20 origin
+record window "$(echo "$(now) - $t0" | bc)" $(( $(packs) - before ))
+
+mapfile -t files < <(git ls-tree -r --name-only HEAD -- $read_dirs | grep -E "$read_ext" | head -30)
+# Read-ahead batches every blob in each directory the session reads from.
+dirs=$(printf '%s\n' "${files[@]}" | xargs -n1 dirname | sort -u)
+git ls-tree HEAD -- $(printf '%s/ ' $dirs) | awk '$2=="blob"{print $3}' | sort -u | timed_fetch read-ahead
+grep_dirs=$(for gs in "${grep_scoped[@]}"; do echo "${gs##* }"; done | sort -u)
+git ls-tree -r HEAD -- $grep_dirs | awk '$2=="blob"{print $3}' | sort -u \
+  | GIT_NO_LAZY_FETCH=1 git cat-file --batch-check='%(objectname)' --buffer 2>/dev/null | awk '$2=="missing"{print $1}' | timed_fetch grep-dirs
+
+lazy_step log git log -n 10 --oneline
+lazy_step show-commit git show --stat HEAD~3
+lazy_step show-file git show "HEAD~5:${files[3]}"
+
+sha=$(git rev-parse HEAD)
+t0=$(now)
+bytes=$(curl -sL -o /dev/null -w '%{size_download}' -H "Authorization: Bearer ${GITHUB_TOKEN:-$(gh auth token)}" \
+  "https://api.github.com/repos/$repo/tarball/$sha")
+record tarball "$(echo "$(now) - $t0" | bc)" "$bytes"
+
+t0=$(now)
+git worktree add -q --no-checkout --detach "$dir/ws2" HEAD
+git -C "$dir/ws2" read-tree HEAD
+index=$(git -C "$dir/ws2" rev-parse --path-format=absolute --git-path index)
+record add-workspace "$(echo "$(now) - $t0" | bc)" "$(stat -c %s "$index")" "$(git -C "$dir/ws2" ls-files | wc -l)"
